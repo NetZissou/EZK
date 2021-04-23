@@ -1,5 +1,5 @@
 ---
-title: "EZK Report"
+title: "The EZK Report"
 author: "Net Zhang"
 date: "4/21/2021"
 output:
@@ -15,6 +15,12 @@ knitr::opts_chunk$set(
 library(tidyverse)
 library(rjags)
 library(coda)
+library(patchwork)
+expit <- function(x) {
+  return(
+    exp(x)/(1 + exp(x))
+  )
+}
 ```
 
 ```{r results = FALSE}
@@ -100,12 +106,21 @@ fit_samples <- coda.samples(
   model_params,
   n.iter = niters
 )
+
+fit_samples_selected <- coda.samples(
+  model_fit,
+  c("mu_alpha",
+    "mu_beta",
+    "sigma_alpha",
+    "sigma_beta"),
+  n.iter = niters
+)
 ```
 
 
 # Background & Definitions 
 
-The World Health Organization sponsored a small clinical trial run in 10 countries where the K9C9 virus in endemic. The goal of this project is to propose a Bayesian hierarchical model for K9C9 status basing on the EZK test results. The model can later be applied to examine the diagnostic ability of the EZK test.
+The World Health Organization sponsored a small clinical trial run in 10 countries where the K9C9 virus in endemic. This project aims to propose a Bayesian hierarchical model for K9C9 status basing on the EZK test results. The model can later be applied to examine the diagnostic ability of the EZK test.
 
 
 At each of the $N^{c}$ countries, a highly accurate and expensive diagnostic test was given by $N^{total} = 100$ randomly selected participants. Let $Y_{ic}$ be the indicator variable of whether the $i^{th}$ participant at the $c^{th}$ country is being infected by K9C9, for $i = 1,..., N^{total}$. Meanwhile, let $x_{ic}$ be the indicator variable that the $i^{th}$ person's test result, where $x_{ic} = 1$ indicate that the individual is tested positive for K9C9. 
@@ -170,6 +185,158 @@ where the priors are specified as below:
 \[
 \mu_{\beta} \sim N(0, 100), \sigma_{\beta} \sim Unif(0, 3)
 \]
+
+
+# Modeling
+
+
+* **Initializing Values: **
+
+\[
+\mu_{\alpha} =0, \sigma_{\alpha} = 1
+\]
+
+\[
+\mu_{\beta} =0, \sigma_{\beta} = 1
+\]
+
+* **Iterations: **
+  
+  - number of total iteration = 10000
+  - number of burn-in steps = 2500
+  - number of adaptation steps = 2500
+
+* **Convergence: **
+
+Here, since there are too many parameters, we only show the tracing plots for the first layer parameters that don't depend on other parameters. From the tracing plot, both two chains appear to be sampling from the same distribution. Therefore we have clear evidence that our algorithm has reached convergence. 
+
+
+```{r fig.height=8}
+plot(fit_samples_selected)
+```
+
+# Results & Interpretation
+
+## Parameters Interpretation
+
+* $\alpha_{c}$:
+
+$\alpha_{c}$ is the estimated **logit probability** of an individual being diagnosed with K9C9 while the EZK test came out negative at country $c$. If the EZK test came out negative, then $expit(\alpha_{c})$ is the probability that the person actually has the K9C9 virus.
+
+* $\beta_{c}$
+
+$\beta_{c}$ could be interpreted as the **log-odds ratio** at the $c$ country. At country $c$, a participant who has been tested positive for the K9C9 is expected to be $expit(\beta_{c})$ times more (or less) likely to carry the K9C9 virus than the participant who has been tested negative for the virus. 
+
+* $\theta_{ic}$
+
+$\theta_{ic}$ is the expected probability for $i^{th}$ participant at $c$ country getting infected with the K9C9 virus. 
+
+* $\mu_{\alpha}$
+
+$\mu_{\alpha}$ is the mean of the **logit** infected probability with negative test EZK testing result across all ten countries involved in the trial.  
+
+* $\sigma_{\alpha}$
+
+$\sigma_{\alpha}$ captures the standard deviation of the **logit** infected probability with negative test EZK testing result across all ten countries involved in the trial.
+
+* $\mu_{\beta}$
+
+$\mu_{\beta}$ is the mean of the **log odds ratio** of being infected with K9C9 virus across all of the ten countries participated in the trial. 
+
+* $\sigma_{\beta}$
+
+$\sigma_{\beta}$ captures the standard deviation of the **log odds ratio** of being infected with K9C9 virus across all of the ten countries participated in the trial. 
+
+## Model Results Analysis
+
+### High-Level Analysis
+
+First, we are interested in the accuracy of the EZK test under this expensive trial. Therefore, using our posterior sample we estimated how likely is an individual actually carried the K9C9 virus while the testing result came out negative:
+
+```{r}
+mu_alpha_est <- as_tibble(fit_samples[[1]]) %>%
+  select(mu_alpha) %>%
+  pull() %>%
+  mean() %>%
+  round(., digits = 4)
+
+expit_mu_alpha_est <- round(expit(mu_alpha_est), digits = 4)
+
+sigma_alpha_est <- as_tibble(fit_samples[[1]]) %>%
+  select(sigma_alpha) %>%
+  pull() %>%
+  mean() %>%
+  round(., digits = 4)
+mu_alpha_ci <- expit(
+  c(mu_alpha_est - 1.96 * sigma_alpha_est, 
+  mu_alpha_est + 1.96 * sigma_alpha_est)
+  ) %>%
+  round(., digits = 2)
+
+
+mu_beta_est <- as_tibble(fit_samples[[1]]) %>%
+  select(mu_beta) %>%
+  pull() %>%
+  mean() %>%
+  round(., digits = 4)
+
+expit_mu_beta_est <- round(expit(mu_beta_est), digits = 4)
+
+TP <- round(expit(mu_alpha_est + mu_beta_est), digits = 4)
+
+FP <- 1 - TP
+
+
+```
+
+
+\[
+E(\mu_{\alpha}|Y) = `r mu_alpha_est`
+\]
+\[
+P(Y=1|EZK=0) = expit(E(\mu_{\alpha}|Y)) = `r expit_mu_alpha_est`
+\]
+Hence as we can see, the estimated rate is nearly $0.30$, which means that among all of the people who tested negative in the EZK test around the world, about 30% of the participants are actually carrying the K9C9 virus. This of course varies by countries, and with our estimation on $\sigma_{\alpha}$, the 95% credible interval for $\mu_{\alpha}$ is $(`r mu_alpha_ci[1]`, `r mu_alpha_ci[2]`)$.
+
+Next, we want to know what's the probability of people who don't really carry the virus got tested with positive result:
+
+\[
+\hat{P(Y=1|EZK=1)} = expit\{E(\mu_{\alpha}|Y) + E(\mu_{\beta}|Y)\} = `r TP`
+\]
+
+\[
+\hat{P(Y=0|EZK=1)} = 1 - \hat{P(Y=1|EZK=1)} = `r FP`
+\]
+
+Hence, generally speaking, the estimated probability of an individual with no K9C9 virus getting tested positive in EZK is about $0.30$. 
+
+
+### Country Level Analysis
+
+In this section, we want to explore the distribution of parameters between different countries. From the plot below, we haven't found any significant variation in the distribution of $\alpha_{c}$ in each countries. Based on the posterior sample from $\alpha_{2}$, we conclude that the estimated probability of being infected while tested negative is the lowest at Country B. 
+
+
+```{r fig.height=4}
+as_tibble(fit_samples[[1]]) %>%
+  select(starts_with("alpha"), mu_alpha) %>%
+  pivot_longer(
+    everything(), values_to = "posterior", names_to = "parameters"
+  ) %>%
+  ggplot(aes(x = parameters, y = expit(posterior))) +
+  geom_boxplot() +
+  labs(y = "expit{posterior}", x= NULL, 
+       title = "Posterior Distribution Boxplot",
+       subtitle = "No significant variation found in the distribution of FNs among the 10 countries") +
+  theme_minimal()
+```
+
+
+# Conclusion
+
+To conclude, the EZK test did a decent job achieving the overall false-negative rate at around 30%. The test performance is slightly different across counties, but this won't lead to any conclusion that some countries have hard-to-detect virus variants. The false-positive and false-negative rates are similar under this testing trial. Still, we think to mitigate the spread of the K9C9 virus and avoid a potential global pandemic, there's an urgent need to improve the performance of the EZK test to bring down the false-negative rate even if we have to make some sacrifice in bringing up the false positives.
+
+\newpage
+
 
 
 
